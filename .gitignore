@@ -1,0 +1,5 @@
+# Compiled programs (build them with "make" on your own machine)
+server
+client
+*.o
+.DS_Store
