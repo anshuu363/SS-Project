@@ -30,7 +30,7 @@
 
 #define MAINMENU "\n--- Select Login Type ---\n1. Customer Login\t2. Joint Account Login\n3. Employee Login\t4. Manager Login\n5. Admin Login\t\t6. Exit Program\nEnter option: "
 #define CUSMENU "\n--- Customer Panel ---\n1. Deposit Money\t2. Withdraw Money\n3. Balance Enquiry\t4. Apply for Loan\n5. Transfer Funds\t6. Change Password\n7. View Transaction History\t8. Provide Feedback\n9. View Details\t10. Logout\n11. Exit\nEnter option: "
-#define ADMINMENU "\n--- Admin Console ---\n1. Register New Employee\t2. Add Customer Account\n3. Delete Customer Account\t4. Modify Customer/Employee Info\n5. Search Account\t6. Manage Roles and Permissions\n7. Logout\t8. Exit\nEnter option: "
+#define ADMINMENU "\n--- Admin Console ---\n1. Register New Employee\t2. Add Customer Account\n3. Delete Customer Account\t4. Modify Customer/Employee Info\n5. Search Account\t6. Manage Roles and Permissions\n7. View Employee Details\t8. Logout\n9. Exit\nEnter option: "
 #define EMPMENU "\n--- Employee Dashboard ---\n1. Register New Customer\t2. Edit Customer Information\n3. Review/Approve Loan Requests\t4. View Assigned Loan Tasks\n5. Review Customer Transactions\t6. Change Password\n7. Logout\t8. Exit\nEnter option: "
 #define MNGMENU "\n--- Manager Section ---\n1. Enable/Disable Customer Accounts\t2. Assign Loan Applications to Employees\n3. View Customer Feedback\n4. Update Your Password\n5. Logout\t6. Exit\nEnter option: "
 

@@ -18,7 +18,7 @@ A client–server banking system in C for Linux. The server keeps all data in fi
 2. **Joint Account**: each holder has their own holder ID and password; both can be logged in at the same time on the same account
 3. **Employee**: adds customers, processes assigned loans
 4. **Manager**: activates/deactivates accounts, assigns loans, reads feedback
-5. **Admin**: password `admin@123`; adds, deletes, modifies and searches accounts, adds employees, changes roles
+5. **Admin**: password `admin@123`; adds, deletes, modifies and searches accounts, adds and views employees, changes roles
 
 The same user cannot be logged in from two sessions at the same time. Different users can.
 

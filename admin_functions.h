@@ -5,6 +5,7 @@ void addEmployee(int connection_fd);
 void deleteAccount(int connection_fd);
 void modifyCE(int connection_fd, int modifyChoice);
 void manageRole(int connection_fd);
+void viewEmployee(int connection_fd);
 
 void adminMenu(int connection_fd)
 {
@@ -53,9 +54,12 @@ void adminMenu(int connection_fd)
                 manageRole(connection_fd);
                 break;
             case 7:
+                viewEmployee(connection_fd);
+                break;
+            case 8:
                 logout(connection_fd);
                 return;
-            case 8:
+            case 9:
                 exitClient(connection_fd);
                 break;
             default:
@@ -107,6 +111,36 @@ void addEmployee(int connection_fd)
 
     printf("Admin added employee %d\n", emp.empID);
     sendInfo(connection_fd, "Employee successfully added\n");
+}
+
+// ================ View Employee Details ================
+void viewEmployee(int connection_fd)
+{
+    struct Employee emp;
+    char message[200];
+
+    askClient(connection_fd, "Enter Employee ID: ");
+    int id = atoi(readBuffer);
+
+    int file = open(EMPPATH, O_RDONLY | O_CREAT, 0644);
+    int offset = findEmployee(file, id, &emp);
+    if(offset == -1)
+    {
+        close(file);
+        sendInfo(connection_fd, "Employee not found");
+        return;
+    }
+
+    // Read lock while reading, so we never see a half-written record
+    lockRecord(file, F_RDLCK, offset, sizeof(struct Employee));
+    lseek(file, offset, SEEK_SET);
+    read(file, &emp, sizeof(emp));
+    lockRecord(file, F_UNLCK, offset, sizeof(struct Employee));
+    close(file);
+
+    sprintf(message, "\n--- Employee Details ---\nEmployee ID: %d\nName: %s %s\nRole: %s",
+            emp.empID, emp.firstName, emp.lastName, emp.role == 0 ? "Manager" : "Employee");
+    sendInfo(connection_fd, message);
 }
 
 // ================ Delete Customer Account ================
