@@ -92,10 +92,15 @@ void changeStatus(int connection_fd)
     }
 
     cs.activeStatus = (choice == 1) ? 0 : 1;
-    saveCustomer(file, offset, &cs);
+    int ok = saveCustomer(file, offset, &cs);
     lockRecord(file, F_UNLCK, offset, sizeof(struct Customer));
     close(file);
 
+    if(!ok)
+    {
+        sendInfo(connection_fd, "Unable to change status");
+        return;
+    }
     printf("Manager %s customer %d\n", choice == 1 ? "deactivated" : "activated", accNo);
     sendInfo(connection_fd, "Status Changed Successfully");
 }
@@ -167,9 +172,13 @@ void assignLoanApplication(int connection_fd)
     }
 
     // Lock the loan record and read it again in case it changed meanwhile
-    lockRecord(file, F_WRLCK, offset, sizeof(struct LoanDetails));
-    lseek(file, offset, SEEK_SET);
-    read(file, &ld, sizeof(ld));
+    if(lockRecord(file, F_WRLCK, offset, sizeof(struct LoanDetails)) == -1)
+    {
+        close(file);
+        sendInfo(connection_fd, "Unable to assign the loan, please try again");
+        return;
+    }
+    pread(file, &ld, sizeof(ld), offset);
 
     if(ld.status != 0)
     {
@@ -179,10 +188,13 @@ void assignLoanApplication(int connection_fd)
     {
         ld.empID = eID;
         ld.status = 1; // Pending
-        lseek(file, offset, SEEK_SET);
-        write(file, &ld, sizeof(ld));
-        sprintf(line, "Loan %d assigned to employee %d", lID, eID);
-        printf("Manager assigned employee %d loan application %d\n", eID, lID);
+        if(saveRecord(file, offset, &ld, sizeof(ld)))
+        {
+            sprintf(line, "Loan %d assigned to employee %d", lID, eID);
+            printf("Manager assigned employee %d loan application %d\n", eID, lID);
+        }
+        else
+            sprintf(line, "Unable to assign loan %d", lID);
     }
 
     lockRecord(file, F_UNLCK, offset, sizeof(struct LoanDetails));

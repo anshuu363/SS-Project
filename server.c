@@ -24,6 +24,7 @@
 #define COUNTERPATH "loanCounter.txt"
 #define HISTORYPATH "trans_hist.txt"
 #define FEEDPATH "feedback.txt"
+#define JOURNALPATH "journal.txt"
 #define HASHKEY "$6$saltsalt$"
 
 
@@ -137,6 +138,8 @@ int main(){
     // Writing to a client that has disconnected should return an error, not kill the process
     signal(SIGPIPE, SIG_IGN);
 
+    // Finish operations that were interrupted when the server crashed last time
+    recoverJournal();
     clearOldSessions();
 
     // Creating Socket

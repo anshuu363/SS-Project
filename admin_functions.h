@@ -95,22 +95,20 @@ void addEmployee(int connection_fd)
     emp.role = 1;
 
     // Lock the whole file while we check for a duplicate ID and add the new employee
+    char *message = "Employee successfully added\n";
     int file = open(EMPPATH, O_RDWR | O_CREAT, 0644);
-    lockRecord(file, F_WRLCK, 0, 0);
-    if(findEmployee(file, emp.empID, &temp) != -1)
-    {
-        lockRecord(file, F_UNLCK, 0, 0);
-        close(file);
-        sendInfo(connection_fd, "Employee ID already exists");
-        return;
-    }
-    lseek(file, 0, SEEK_END);
-    write(file, &emp, sizeof(emp));
+    if(lockRecord(file, F_WRLCK, 0, 0) == -1)
+        message = "Unable to add employee";
+    else if(findEmployee(file, emp.empID, &temp) != -1)
+        message = "Employee ID already exists";
+    else if(!saveRecord(file, -1, &emp, sizeof(emp)))
+        message = "Unable to add employee";
+    else
+        printf("Admin added employee %d\n", emp.empID);
     lockRecord(file, F_UNLCK, 0, 0);
     close(file);
 
-    printf("Admin added employee %d\n", emp.empID);
-    sendInfo(connection_fd, "Employee successfully added\n");
+    sendInfo(connection_fd, message);
 }
 
 // ================ View Employee Details ================
@@ -147,10 +145,13 @@ void viewEmployee(int connection_fd)
 // We don't remove the record and shift the rest of the file. Other clients may be
 // working with record offsets at this moment, so we only mark the slot as deleted
 // (account number -1, empty password). Searches will never find it again.
+// The account and its joint holders are deleted together through the journal.
 void deleteAccount(int connection_fd)
 {
-    struct Customer c;
-    struct JointHolder h;
+    struct Customer c, deleted;
+    struct JointHolder h, deletedHolder;
+    struct JournalEntry j;
+    char *message = "Account deleted successfully";
 
     askClient(connection_fd, "Enter Account Number to delete: ");
     int accNo = atoi(readBuffer);
@@ -164,34 +165,36 @@ void deleteAccount(int connection_fd)
         return;
     }
 
-    bzero(&c, sizeof(c));
-    c.accountNumber = -1;
-    saveCustomer(file, offset, &c);
+    startJournal(&j);
+    bzero(&deleted, sizeof(deleted));
+    deleted.accountNumber = -1;
+    journalWrite(&j, CUSFILE, file, offset, &c, &deleted, sizeof(deleted));
+
+    // Lock the whole holder file (after customers.txt, same order as addCustomer)
+    // and also delete the holders if it was a joint account
+    int jointFile = open(JOINTPATH, O_RDWR | O_CREAT, 0644);
+    int ok = lockRecord(jointFile, F_WRLCK, 0, 0) != -1;
+    int hOffset = 0;
+    bzero(&deletedHolder, sizeof(deletedHolder));
+    deletedHolder.holderID = -1;
+    deletedHolder.accountNumber = -1;
+    while(ok && read(jointFile, &h, sizeof(h)) == sizeof(h))
+    {
+        if(h.accountNumber == accNo && j.writes < MAXWRITES)
+            journalWrite(&j, JOINTFILE, jointFile, hOffset, &h, &deletedHolder, sizeof(h));
+        hOffset += sizeof(h);
+    }
+
+    if(!ok || !commitJournal(&j))
+        message = "Unable to delete the account, please try again";
+    else
+        printf("Admin deleted account %d\n", accNo);
+
+    lockRecord(jointFile, F_UNLCK, 0, 0);
+    close(jointFile);
     lockRecord(file, F_UNLCK, offset, sizeof(struct Customer));
     close(file);
-
-    // Also delete the holders if it was a joint account
-    file = open(JOINTPATH, O_RDWR | O_CREAT, 0644);
-    int hOffset = 0;
-    while(read(file, &h, sizeof(h)) == sizeof(h))
-    {
-        if(h.accountNumber == accNo)
-        {
-            bzero(&h, sizeof(h));
-            h.holderID = -1;
-            h.accountNumber = -1;
-            lockRecord(file, F_WRLCK, hOffset, sizeof(h));
-            lseek(file, hOffset, SEEK_SET);
-            write(file, &h, sizeof(h));
-            lockRecord(file, F_UNLCK, hOffset, sizeof(h));
-        }
-        hOffset += sizeof(h);
-        lseek(file, hOffset, SEEK_SET);
-    }
-    close(file);
-
-    printf("Admin deleted account %d\n", accNo);
-    sendInfo(connection_fd, "Account deleted successfully");
+    sendInfo(connection_fd, message);
 }
 
 // ===================== Modify Customer / Employee ==================
@@ -219,10 +222,15 @@ void modifyCE(int connection_fd, int modifyChoice)
         }
 
         strcpy(c.customerName, newName);
-        saveCustomer(file, offset, &c);
+        int ok = saveCustomer(file, offset, &c);
         lockRecord(file, F_UNLCK, offset, sizeof(struct Customer));
         close(file);
 
+        if(!ok)
+        {
+            sendInfo(connection_fd, "Unable to change name");
+            return;
+        }
         printf("Name of account %d changed to %s\n", accNo, newName);
         sendInfo(connection_fd, "Name changed successfully");
     }
@@ -244,15 +252,21 @@ void modifyCE(int connection_fd, int modifyChoice)
             return;
         }
 
-        lockRecord(file, F_WRLCK, offset, sizeof(struct Employee));
-        lseek(file, offset, SEEK_SET);
-        read(file, &emp, sizeof(emp));
-        strcpy(emp.firstName, newName);
-        lseek(file, offset, SEEK_SET);
-        write(file, &emp, sizeof(emp));
+        int ok = lockRecord(file, F_WRLCK, offset, sizeof(struct Employee)) != -1;
+        if(ok)
+        {
+            pread(file, &emp, sizeof(emp), offset);
+            strcpy(emp.firstName, newName);
+            ok = saveRecord(file, offset, &emp, sizeof(emp));
+        }
         lockRecord(file, F_UNLCK, offset, sizeof(struct Employee));
         close(file);
 
+        if(!ok)
+        {
+            sendInfo(connection_fd, "Unable to change name");
+            return;
+        }
         printf("Admin changed name of employee: %d\n", id);
         sendInfo(connection_fd, "Name changed successfully");
     }
@@ -286,15 +300,21 @@ void manageRole(int connection_fd)
         return;
     }
 
-    lockRecord(file, F_WRLCK, offset, sizeof(struct Employee));
-    lseek(file, offset, SEEK_SET);
-    read(file, &emp, sizeof(emp));
-    emp.role = (choice == 1) ? 0 : 1;
-    lseek(file, offset, SEEK_SET);
-    write(file, &emp, sizeof(emp));
+    int ok = lockRecord(file, F_WRLCK, offset, sizeof(struct Employee)) != -1;
+    if(ok)
+    {
+        pread(file, &emp, sizeof(emp), offset);
+        emp.role = (choice == 1) ? 0 : 1;
+        ok = saveRecord(file, offset, &emp, sizeof(emp));
+    }
     lockRecord(file, F_UNLCK, offset, sizeof(struct Employee));
     close(file);
 
+    if(!ok)
+    {
+        sendInfo(connection_fd, "Unable to change role");
+        return;
+    }
     printf("Admin made %d %s\n", id, choice == 1 ? "manager" : "employee");
     sendInfo(connection_fd, "Role changed successfully");
 }

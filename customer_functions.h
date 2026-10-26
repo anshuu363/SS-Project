@@ -161,14 +161,27 @@ void depositMoney(int connection_fd, int accountNumber){
         return;
     }
 
-    c.balance += amount;
-    saveCustomer(file, offset, &c);
+    // The account may have been deactivated by the manager after this customer logged in
+    int ok = c.activeStatus == 1;
+    if(ok){
+        // New balance and history line are saved together through the journal
+        struct JournalEntry j;
+        struct Customer old = c;
+        startJournal(&j);
+        c.balance += amount;
+        journalWrite(&j, CUSFILE, file, offset, &old, &c, sizeof(c));
+        sprintf(text, "%.2f deposited", amount);
+        journalHistory(&j, accountNumber, text);
+        ok = commitJournal(&j);
+    }
 
     lockRecord(file, F_UNLCK, offset, sizeof(struct Customer));
     close(file);
 
-    sprintf(text, "%.2f deposited", amount);
-    addHistory(accountNumber, text);
+    if(!ok){
+        sendInfo(connection_fd, c.activeStatus != 1 ? "This account is deactivated" : "Deposit failed, please try again");
+        return;
+    }
     printf("Customer whose acc no.: %d deposited %.2f\n", accountNumber, amount);
     sendInfo(connection_fd, "Deposit successful!");
 }
@@ -195,24 +208,31 @@ void withdrawMoney(int connection_fd, int accountNumber){
 
     // Balance is checked while we hold the lock, so two joint holders
     // can never both withdraw the same money
-    if(c.balance < amount){
-        lockRecord(file, F_UNLCK, offset, sizeof(struct Customer));
-        close(file);
+    char *message = "Withdrawal successful!";
+    if(c.activeStatus != 1)
+        message = "This account is deactivated";
+    else if(c.balance < amount){
         printf("Insufficient balance in account: %d\n", accountNumber);
-        sendInfo(connection_fd, "Insufficient funds!");
-        return;
+        message = "Insufficient funds!";
+    }
+    else{
+        struct JournalEntry j;
+        struct Customer old = c;
+        startJournal(&j);
+        c.balance -= amount;
+        journalWrite(&j, CUSFILE, file, offset, &old, &c, sizeof(c));
+        sprintf(text, "%.2f withdraw", amount);
+        journalHistory(&j, accountNumber, text);
+        if(commitJournal(&j))
+            printf("New balance of %d account number: %.2f\n", accountNumber, c.balance);
+        else
+            message = "Withdrawal failed, please try again";
     }
 
-    c.balance -= amount;
-    saveCustomer(file, offset, &c);
-
+    // Unlock before talking to the client, so others never wait for this client's network
     lockRecord(file, F_UNLCK, offset, sizeof(struct Customer));
     close(file);
-
-    sprintf(text, "%.2f withdraw", amount);
-    addHistory(accountNumber, text);
-    printf("New balance of %d account number: %.2f\n", accountNumber, c.balance);
-    sendInfo(connection_fd, "Withdrawal successful!");
+    sendInfo(connection_fd, message);
 }
 
 // ======================= View Balance =======================
@@ -285,30 +305,37 @@ void applyLoan(int connection_fd, int accountNumber){
 
     // Lock the whole counter file so two customers never get the same loan ID
     int file = open(COUNTERPATH, O_RDWR | O_CREAT, 0644);
-    lockRecord(file, F_WRLCK, 0, 0);
+    if(lockRecord(file, F_WRLCK, 0, 0) == -1){
+        close(file);
+        sendInfo(connection_fd, "Unable to apply for loan!");
+        return;
+    }
     ct.count = 0;
     read(file, &ct, sizeof(ct));
     ct.count++;
-    lseek(file, 0, SEEK_SET);
-    write(file, &ct, sizeof(ct));
+    int ok = saveRecord(file, 0, &ct, sizeof(ct));
     lockRecord(file, F_UNLCK, 0, 0);
     close(file);
 
-    ld.empID = -1;            // no employee assigned yet
-    ld.accountNumber = accountNumber;
-    ld.loanAmount = amount;
-    ld.status = 0;            // requested
-    ld.loanID = ct.count;
+    // If the loan is not saved after this, its ID is just skipped: no two loans share an ID
+    if(ok){
+        ld.empID = -1;            // no employee assigned yet
+        ld.accountNumber = accountNumber;
+        ld.loanAmount = amount;
+        ld.status = 0;            // requested
+        ld.loanID = ct.count;
 
-    file = open(LOANPATH, O_WRONLY | O_APPEND | O_CREAT, 0644);
-    int response = write(file, &ld, sizeof(ld));
-    close(file);
+        file = open(LOANPATH, O_WRONLY | O_APPEND | O_CREAT, 0644);
+        ok = saveRecord(file, -1, &ld, sizeof(ld));
+        close(file);
+    }
 
-    printf("Applied loan of %d from acc no.: %d\n", amount, accountNumber);
-    if(response <= 0)
+    if(!ok){
         sendInfo(connection_fd, "Unable to apply for loan!");
-    else
-        sendInfo(connection_fd, "Loan applied");
+        return;
+    }
+    printf("Applied loan of %d from acc no.: %d\n", amount, accountNumber);
+    sendInfo(connection_fd, "Loan applied");
 }
 
 // ======================= Money Transfer =======================
@@ -351,54 +378,67 @@ void transferFunds(int connection_fd, int sourceAccount){
         srcOffset = lockCustomer(file, sourceAccount, F_WRLCK, &src);
     }
 
-    int ok = 1;
-    if(srcOffset == -1 || dstOffset == -1){
-        sendInfo(connection_fd, "Account dosen't Exists!");
-        ok = 0;
-    }
-    else if(src.balance < amount){
-        sendInfo(connection_fd, "Insufficient funds in the source account.");
-        ok = 0;
-    }
+    // Check again under the locks: the accounts may have changed while we waited
+    if(srcOffset == -1 || dstOffset == -1)
+        strcpy(text, "Account dosen't Exists!");
+    else if(src.activeStatus != 1 || dst.activeStatus != 1)
+        strcpy(text, "Account is deactivated");
+    else if(src.balance < amount)
+        strcpy(text, "Insufficient funds in the source account.");
     else{
+        // Both balances and both history lines are saved together through the journal,
+        // so a crash can never take the money from one account without giving it to the other
+        struct JournalEntry j;
+        struct Customer oldSrc = src, oldDst = dst;
+        startJournal(&j);
         src.balance -= amount;
         dst.balance += amount;
-        saveCustomer(file, srcOffset, &src);
-        saveCustomer(file, dstOffset, &dst);
+        journalWrite(&j, CUSFILE, file, srcOffset, &oldSrc, &src, sizeof(src));
+        journalWrite(&j, CUSFILE, file, dstOffset, &oldDst, &dst, sizeof(dst));
+        sprintf(text, "%.2f transferred into acc no %d", amount, destAccount);
+        journalHistory(&j, sourceAccount, text);
+        sprintf(text, "%.2f credited by acc no %d", amount, sourceAccount);
+        journalHistory(&j, destAccount, text);
+
+        if(commitJournal(&j)){
+            printf("%.2f transferred into acc no %d from acc no %d\n", amount, destAccount, sourceAccount);
+            sprintf(text, "Current Balance of %d is: %.2f", sourceAccount, src.balance);
+        }
+        else
+            strcpy(text, "Transfer failed, please try again");
     }
 
+    // Unlock before talking to the client, so others never wait for this client's network
     if(srcOffset != -1)
         lockRecord(file, F_UNLCK, srcOffset, sizeof(struct Customer));
     if(dstOffset != -1)
         lockRecord(file, F_UNLCK, dstOffset, sizeof(struct Customer));
     close(file);
-
-    if(!ok)
-        return;
-
-    sprintf(text, "%.2f transferred into acc no %d", amount, destAccount);
-    addHistory(sourceAccount, text);
-    sprintf(text, "%.2f credited by acc no %d", amount, sourceAccount);
-    addHistory(destAccount, text);
-
-    printf("%.2f transferred into acc no %d from acc no %d\n", amount, destAccount, sourceAccount);
-    sprintf(text, "Current Balance of %d is: %.2f", sourceAccount, src.balance);
     sendInfo(connection_fd, text);
 }
 
 // ======================= View Transaction History =======================
+// Shows the 10 newest transactions, oldest of them first
 void transactionHistory(int connection_fd, int accountNumber){
     char message[4000];
     struct trans_histroy th;
-    int count = 0;
+    int offsets[10];   // offsets of the last 10 lines of this account (used as a ring)
+    int count = 0, i, offset = 0;
 
     bzero(message, sizeof(message));
     int file = open(HISTORYPATH, O_RDONLY | O_CREAT, 0644);
-    while(read(file, &th, sizeof(th)) == sizeof(th) && count < 10){
+    while(read(file, &th, sizeof(th)) == sizeof(th)){
         if(th.acc_no == accountNumber){
-            strncat(message, th.hist, sizeof(message) - strlen(message) - 1);
+            offsets[count % 10] = offset;
             count++;
         }
+        offset += sizeof(th);
+    }
+
+    int first = count > 10 ? count - 10 : 0;
+    for(i = first; i < count; i++){
+        pread(file, &th, sizeof(th), offsets[i % 10]);
+        strncat(message, th.hist, sizeof(message) - strlen(message) - 1);
     }
     close(file);
 
@@ -423,10 +463,10 @@ void addFeedback(int connection_fd){
         strcpy(fb.feedback, "Worse");
 
     int file = open(FEEDPATH, O_CREAT | O_WRONLY | O_APPEND, 0644);
-    write(file, &fb, sizeof(fb));
+    int ok = saveRecord(file, -1, &fb, sizeof(fb));
     close(file);
 
-    sendInfo(connection_fd, "Thank you for your feedback");
+    sendInfo(connection_fd, ok ? "Thank you for your feedback" : "Unable to save feedback");
 }
 
 // ======================= Change Password (normal customer) =======================
@@ -446,11 +486,15 @@ void changePassword(int connection_fd, int accountNumber){
     }
 
     strcpy(c.password, crypt(newPassword, HASHKEY));
-    saveCustomer(file, offset, &c);
+    int ok = saveCustomer(file, offset, &c);
 
     lockRecord(file, F_UNLCK, offset, sizeof(struct Customer));
     close(file);
 
+    if(!ok){
+        sendInfo(connection_fd, "Unable to change password");
+        return;
+    }
     printf("Customer %d changed password\n", accountNumber);
     sendInfo(connection_fd, "Password changed successfully");
 }
@@ -472,15 +516,23 @@ void changeJointPassword(int connection_fd, int holderID){
         return;
     }
 
-    lockRecord(file, F_WRLCK, offset, sizeof(struct JointHolder));
-    lseek(file, offset, SEEK_SET);
-    read(file, &h, sizeof(h));
-    strcpy(h.password, crypt(newPassword, HASHKEY));
-    lseek(file, offset, SEEK_SET);
-    write(file, &h, sizeof(h));
+    int ok = lockRecord(file, F_WRLCK, offset, sizeof(struct JointHolder)) != -1;
+    if(ok){
+        // Read again under the lock: the account may have been deleted meanwhile
+        pread(file, &h, sizeof(h), offset);
+        ok = h.holderID == holderID;
+    }
+    if(ok){
+        strcpy(h.password, crypt(newPassword, HASHKEY));
+        ok = saveRecord(file, offset, &h, sizeof(h));
+    }
     lockRecord(file, F_UNLCK, offset, sizeof(struct JointHolder));
     close(file);
 
+    if(!ok){
+        sendInfo(connection_fd, "Unable to change password");
+        return;
+    }
     printf("Joint holder %d changed password\n", holderID);
     sendInfo(connection_fd, "Password changed successfully");
 }

@@ -1,0 +1,186 @@
+classDiagram
+    direction TB
+
+    class Client {
+        <<Application>>
+        +main(argc, argv)
+        +hide_input(buffer, size)
+    }
+
+    class Server {
+        <<Application>>
+        +main()
+        +connectionHandler(int)
+        +reaperThread(void*)
+        +setupSignalHandlers()
+        +cleanupSemaphore(int)
+        +clearOldSessions()
+    }
+
+    class CommonFunctions {
+        <<Utility>>
+        +startSession(char*, int) int
+        +endSession()
+        +askClient(int, char*)
+        +sendInfo(int, char*)
+        +lockRecord(int, int, int, int) int
+        +lockCustomer(int, int, int, Customer*) int
+        +findCustomer / findJointHolder / findEmployee / findLoan()
+        +saveRecord(int, int, void*, int) int
+        +startJournal(JournalEntry*)
+        +journalWrite(JournalEntry*, ...)
+        +journalHistory(JournalEntry*, int, char*)
+        +commitJournal(JournalEntry*) int
+        +recoverJournal()
+    }
+
+    class CustomerHandler {
+        <<Controller>>
+        +customerLogin(int)
+        +jointLogin(int)
+        +customerMenu(int, int, int)
+        +depositMoney(int, int)
+        +withdrawMoney(int, int)
+        +customerBal(int, int)
+        +transferFunds(int, int)
+        +applyLoan(int, int)
+        +changePassword(int, int)
+        +changeJointPassword(int, int)
+        +transactionHistory(int, int)
+        +addFeedback(int)
+        +viewDetails(int, int)
+    }
+
+    class EmployeeHandler {
+        <<Controller>>
+        +employeeMenu(int)
+        +checkEmployee(int, char*, int) int
+        +addCustomer(int)
+        +askJointHolder(int, int, int, JointHolder*, int)
+        +approveRejectLoan(int, int)
+        +viewAssignedLoan(int, int)
+        +changeEMPPassword(int, int)
+    }
+
+    class ManagerHandler {
+        <<Controller>>
+        +managerMenu(int)
+        +changeStatus(int)
+        +assignLoanApplication(int)
+        +readFeedBack(int)
+    }
+
+    class AdminHandler {
+        <<Controller>>
+        +adminMenu(int)
+        +addEmployee(int)
+        +viewEmployee(int)
+        +deleteAccount(int)
+        +modifyCE(int, int)
+        +manageRole(int)
+    }
+
+    class Customer {
+        <<Struct>>
+        +int accountNumber
+        +float balance
+        +char customerName[20]
+        +char password[256]
+        +int activeStatus
+    }
+
+    class JointHolder {
+        <<Struct>>
+        +int holderID
+        +int accountNumber
+        +char name[20]
+        +char password[256]
+    }
+
+    class Employee {
+        <<Struct>>
+        +int empID
+        +char firstName[20]
+        +char lastName[20]
+        +char password[256]
+        +int role
+    }
+
+    class LoanDetails {
+        <<Struct>>
+        +int empID
+        +int accountNumber
+        +int loanID
+        +int loanAmount
+        +int status
+    }
+
+    class trans_histroy {
+        <<Struct>>
+        +int acc_no
+        +char hist[1024]
+    }
+
+    class FeedBack {
+        <<Struct>>
+        +char feedback[1024]
+    }
+
+    class Counter {
+        <<Struct>>
+        +int count
+    }
+
+    class JournalEntry {
+        <<Struct>>
+        +int done
+        +int writes
+        +int histories
+        +JournalWrite w[4]
+        +trans_histroy hist[2]
+    }
+
+    class JournalWrite {
+        <<Struct>>
+        +int fileID
+        +int fd
+        +int offset
+        +int size
+        +char before[512]
+        +char after[512]
+    }
+
+    Client ..> Server : connects to (TCP 8080)
+    Server ..> CustomerHandler : uses
+    Server ..> EmployeeHandler : uses
+    Server ..> ManagerHandler : uses
+    Server ..> AdminHandler : uses
+    Server ..> CommonFunctions : recoverJournal at start
+
+    CustomerHandler ..> CommonFunctions : uses
+    EmployeeHandler ..> CommonFunctions : uses
+    ManagerHandler ..> CommonFunctions : uses
+    AdminHandler ..> CommonFunctions : uses
+    AdminHandler ..> EmployeeHandler : addCustomer
+    ManagerHandler ..> EmployeeHandler : changeEMPPassword
+
+    CustomerHandler ..> Customer : deposits / withdraws / transfers
+    CustomerHandler ..> LoanDetails : applies
+    CustomerHandler ..> FeedBack : submits
+    EmployeeHandler ..> Customer : creates / modifies
+    EmployeeHandler ..> JointHolder : creates
+    EmployeeHandler ..> LoanDetails : approves / rejects
+    ManagerHandler ..> Customer : activates / deactivates
+    ManagerHandler ..> LoanDetails : assigns
+    ManagerHandler ..> FeedBack : reads
+    AdminHandler ..> Employee : manages
+    AdminHandler ..> Customer : deletes / modifies
+    CommonFunctions ..> JournalEntry : commits / recovers
+
+    Customer "1" -- "0..2" JointHolder : held by
+    Customer "1" -- "0..*" LoanDetails : applies for
+    Customer "1" -- "0..*" trans_histroy : has
+    Employee "1" -- "0..*" LoanDetails : is assigned
+    Counter "1" -- "0..*" LoanDetails : gives loanID
+    JournalEntry "1" *-- "1..4" JournalWrite : contains
+    JournalEntry "1" *-- "0..2" trans_histroy : contains

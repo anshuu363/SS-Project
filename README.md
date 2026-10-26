@@ -11,7 +11,15 @@ A client–server banking system in C for Linux. The server keeps all data in fi
 | File management | `open`, `read`, `write`, `lseek`, `close` on the `.txt` data files |
 | File locking | `fcntl` record locks: read lock for viewing, write lock for deposit/withdraw/transfer |
 | IPC | Named POSIX semaphores: one login session per user |
-| Signals | `SIGINT`/`SIGTERM`/… handlers free the login, `SIGPIPE` ignored |
+| Signals | `SIGINT`/`SIGTERM`/… handlers free the login, `SIGPIPE` ignored, `sigprocmask` blocks them while an operation is being saved |
+
+## ACID properties of financial operations
+| Property | How |
+|---|---|
+| Atomicity | Journal (`journal.txt`, `commitJournal` in `common_functions.h`). Before a transfer, deposit, withdrawal, loan approval, account creation or deletion changes anything, the old and new value of every record (and the history lines) are saved in the journal. Then the records are changed and the entry is marked done. On start the server runs `recoverJournal()`, which finishes every entry that is not done. So a transfer can never take money from one account without giving it to the other, and a loan can never be paid out twice. |
+| Consistency | Balances are checked while the record is locked (never below 0), amounts must be positive, deactivated accounts cannot move money, account numbers and holder IDs are unique (checked under a whole-file lock) |
+| Isolation | `fcntl` write locks around every read-change-write, records are read again after locking, two accounts are always locked in file order (no deadlock), no lock is held while waiting for user input |
+| Durability | Every write goes through `saveRecord()`, which calls `fsync()` before the user is told "successful" |
 
 ## Login types
 1. **Customer**: normal account, logs in with account number and password
@@ -74,8 +82,11 @@ gcc client.c -o client
 |---|---|
 | `server.c` | Main server: sockets, fork, thread, main menu |
 | `client.c` | Client program |
-| `common_functions.h` | Helpers: sessions (semaphores), locking, reading/writing to the client |
+| `common_functions.h` | Helpers: sessions (semaphores), locking, saving with `fsync`, journal, reading/writing to the client |
 | `customer_functions.h` | Customer and joint account login and menu |
 | `employee_functions.h`, `manager_functions.h`, `admin_functions.h` | Staff menus |
 | `bank_fun.h` | Record structures |
 | `customers.txt`, `jointHolders.txt`, `employees.txt`, `loanDetails.txt`, `loanCounter.txt`, `trans_hist.txt`, `feedback.txt` | Data files (binary records) |
+| `journal.txt` | Journal of operations in progress (emptied every time the server starts) |
+| `ClassDiagram.mmd` | Class diagram (Mermaid). Render it with `npx @mermaid-js/mermaid-cli -i ClassDiagram.mmd -o ClassDiagram.png` or paste it into mermaid.live |
+| `Flowchart.png` | Picture of the class diagram (rendered from `ClassDiagram.mmd`) |

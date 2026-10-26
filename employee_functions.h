@@ -1,7 +1,7 @@
 void employeeMenu(int connection_fd);
 int checkEmployee(int empID, char *password, int role);
 void addCustomer(int connection_fd);
-void addJointHolder(int connection_fd, int accountNumber, int holderNumber);
+void askJointHolder(int connection_fd, int accountNumber, int holderNumber, struct JointHolder *h, int otherID);
 void approveRejectLoan(int connection_fd, int empID);
 void viewAssignedLoan(int connection_fd, int empID);
 void changeEMPPassword(int connection_fd, int empID);
@@ -87,10 +87,13 @@ int checkEmployee(int empID, char *password, int role)
 }
 
 // ================= Add Customer (normal or joint account) =================
-// Used by employees and by the admin
+// Used by employees and by the admin.
+// We first ask for everything (also the joint holders) and then save it all in one step,
+// so a client that disconnects halfway never leaves a joint account without holders.
 void addCustomer(int connection_fd)
 {
     struct Customer customer, temp;
+    struct JointHolder holders[2], tempHolder;
     char text[100];
 
     bzero(&customer, sizeof(customer));
@@ -130,69 +133,90 @@ void addCustomer(int connection_fd)
     }
     customer.activeStatus = 1;
 
-    // Lock the whole file so two staff members cannot add the same account number at the same time
-    int file = open(CUSPATH, O_RDWR | O_CREAT, 0644);
-    lockRecord(file, F_WRLCK, 0, 0);
-    if(findCustomer(file, customer.accountNumber, &temp) != -1)
-    {
-        lockRecord(file, F_UNLCK, 0, 0);
-        close(file);
-        sendInfo(connection_fd, "Account number already exists");
-        return;
-    }
-    lseek(file, 0, SEEK_END);
-    write(file, &customer, sizeof(customer));
-    lockRecord(file, F_UNLCK, 0, 0);
-    close(file);
-
-    sprintf(text, "%.2f Opening Balance", customer.balance);
-    addHistory(customer.accountNumber, text);
-
     if(type == 2)
     {
-        addJointHolder(connection_fd, customer.accountNumber, 1);
-        addJointHolder(connection_fd, customer.accountNumber, 2);
+        askJointHolder(connection_fd, customer.accountNumber, 1, &holders[0], -1);
+        askJointHolder(connection_fd, customer.accountNumber, 2, &holders[1], holders[0].holderID);
     }
 
-    printf("Customer added whose account number is: %d\n", customer.accountNumber);
-    sendInfo(connection_fd, "Customer added successfully!");
+    // Lock both files completely, so two staff members cannot add the same
+    // account number or the same holder ID at the same time.
+    // Always customers.txt first, then jointHolders.txt (same order as deleteAccount).
+    int file = open(CUSPATH, O_RDWR | O_CREAT, 0644);
+    int jointFile = open(JOINTPATH, O_RDWR | O_CREAT, 0644);
+    int locked = lockRecord(file, F_WRLCK, 0, 0) != -1 && lockRecord(jointFile, F_WRLCK, 0, 0) != -1;
+
+    if(!locked)
+        strcpy(text, "Unable to add customer, please try again");
+    else if(findCustomer(file, customer.accountNumber, &temp) != -1)
+        strcpy(text, "Account number already exists");
+    else if(type == 2 && (findJointHolder(jointFile, holders[0].holderID, &tempHolder) != -1 ||
+                          findJointHolder(jointFile, holders[1].holderID, &tempHolder) != -1))
+        strcpy(text, "A holder ID was taken meanwhile, please try again");
+    else
+    {
+        // The account, its holders and the opening balance line are saved together
+        struct JournalEntry j;
+        startJournal(&j);
+        journalWrite(&j, CUSFILE, file, lseek(file, 0, SEEK_END), NULL, &customer, sizeof(customer));
+        if(type == 2)
+        {
+            int end = lseek(jointFile, 0, SEEK_END);
+            journalWrite(&j, JOINTFILE, jointFile, end, NULL, &holders[0], sizeof(struct JointHolder));
+            journalWrite(&j, JOINTFILE, jointFile, end + sizeof(struct JointHolder), NULL, &holders[1], sizeof(struct JointHolder));
+        }
+        sprintf(text, "%.2f Opening Balance", customer.balance);
+        journalHistory(&j, customer.accountNumber, text);
+
+        if(commitJournal(&j))
+        {
+            printf("Customer added whose account number is: %d\n", customer.accountNumber);
+            strcpy(text, "Customer added successfully!");
+        }
+        else
+            strcpy(text, "Unable to add customer, please try again");
+    }
+
+    lockRecord(file, F_UNLCK, 0, 0);
+    lockRecord(jointFile, F_UNLCK, 0, 0);
+    close(file);
+    close(jointFile);
+    sendInfo(connection_fd, text);
 }
 
-// Ask for the details of one holder of a joint account and save them
-void addJointHolder(int connection_fd, int accountNumber, int holderNumber)
+// Ask for the details of one holder of a joint account (they are saved by addCustomer).
+// otherID is the ID of the other holder, which this one must not reuse (-1 = none).
+void askJointHolder(int connection_fd, int accountNumber, int holderNumber, struct JointHolder *h, int otherID)
 {
-    struct JointHolder h, temp;
+    struct JointHolder temp;
     char prompt[100];
 
-    bzero(&h, sizeof(h));
-    h.accountNumber = accountNumber;
+    bzero(h, sizeof(*h));
+    h->accountNumber = accountNumber;
 
-    // Keep asking until we get a holder ID that is not used yet
+    // Keep asking until we get a holder ID that is not used yet.
+    // addCustomer checks it again under the lock before saving.
     while(1)
     {
         sprintf(prompt, "Enter Holder %d ID: ", holderNumber);
         askClient(connection_fd, prompt);
-        h.holderID = atoi(readBuffer);
+        h->holderID = atoi(readBuffer);
 
         int file = open(JOINTPATH, O_RDONLY | O_CREAT, 0644);
-        int exists = findJointHolder(file, h.holderID, &temp) != -1;
+        int exists = findJointHolder(file, h->holderID, &temp) != -1;
         close(file);
 
-        if(h.holderID > 0 && !exists)
+        if(h->holderID > 0 && h->holderID != otherID && !exists)
             break;
         sendInfo(connection_fd, "Invalid or already used holder ID, try again");
     }
 
     sprintf(prompt, "Enter Holder %d Name: ", holderNumber);
     askClient(connection_fd, prompt);
-    copyInput(h.name, sizeof(h.name));
+    copyInput(h->name, sizeof(h->name));
 
     askClient(connection_fd, "Enter password: ");
-    strcpy(h.password, crypt(readBuffer, HASHKEY));
-
-    int file = open(JOINTPATH, O_WRONLY | O_APPEND | O_CREAT, 0644);
-    write(file, &h, sizeof(h));
-    close(file);
+    strcpy(h->password, crypt(readBuffer, HASHKEY));
 }
 
 // ================= Approve/Reject Loan =================
@@ -214,25 +238,50 @@ void approveRejectLoan(int connection_fd, int empID)
         return;
     }
 
-    // Lock the loan record, then read it again in case it changed meanwhile
-    lockRecord(file, F_WRLCK, offset, sizeof(struct LoanDetails));
-    lseek(file, offset, SEEK_SET);
-    read(file, &ld, sizeof(ld));
-
-    // Only a pending loan that is assigned to this employee can be processed (no double approval)
+    // Only a pending loan that is assigned to this employee can be processed (no double approval).
+    // Checked here without a lock to answer quickly, and checked again below under the lock.
     if(ld.status != 1 || ld.empID != empID)
     {
-        lockRecord(file, F_UNLCK, offset, sizeof(struct LoanDetails));
         close(file);
         sendInfo(connection_fd, "This loan is not assigned to you or is already approved/rejected");
         return;
     }
 
+    // Ask before locking: a record must never stay locked while we wait for the user
     askClient(connection_fd, "Enter 1 to Approve Loan\nEnter 2 to Reject Loan: ");
     int choice = atoi(readBuffer);
-
-    if(choice == 1)
+    if(choice != 1 && choice != 2)
     {
+        close(file);
+        sendInfo(connection_fd, "Invalid Choice");
+        return;
+    }
+
+    // Lock the loan record, then read it again in case it changed meanwhile
+    if(lockRecord(file, F_WRLCK, offset, sizeof(struct LoanDetails)) == -1)
+    {
+        close(file);
+        sendInfo(connection_fd, "Unable to process the loan, please try again");
+        return;
+    }
+    pread(file, &ld, sizeof(ld), offset);
+    struct LoanDetails oldLoan = ld;
+
+    if(ld.status != 1 || ld.empID != empID)
+    {
+        strcpy(text, "This loan was changed meanwhile and cannot be processed");
+    }
+    else if(choice == 2)
+    {
+        ld.status = 3;   // rejected
+        strcpy(text, saveRecord(file, offset, &ld, sizeof(ld)) ? "Loan rejected" : "Unable to process the loan, please try again");
+    }
+    else
+    {
+        struct JournalEntry j;
+        startJournal(&j);
+
+        // Lock order is always: loan record first, then customer record
         int cusFile = open(CUSPATH, O_RDWR);
         int cusOffset = lockCustomer(cusFile, ld.accountNumber, F_WRLCK, &cs);
 
@@ -243,36 +292,26 @@ void approveRejectLoan(int connection_fd, int empID)
         }
         else
         {
+            struct Customer oldCs = cs;
+            char hist[100];
             cs.balance += ld.loanAmount;
-            saveCustomer(cusFile, cusOffset, &cs);
             ld.status = 2;   // approved
+            journalWrite(&j, CUSFILE, cusFile, cusOffset, &oldCs, &cs, sizeof(cs));
+            sprintf(hist, "%d credited by loan id %d", ld.loanAmount, lID);
+            journalHistory(&j, ld.accountNumber, hist);
             strcpy(text, "Loan Approved");
         }
+
+        // The new balance and the new loan status are saved together, so after a crash
+        // the loan can never be "pending" again with the money already paid out
+        journalWrite(&j, LOANFILE, file, offset, &oldLoan, &ld, sizeof(ld));
+        if(!commitJournal(&j))
+            strcpy(text, "Unable to process the loan, please try again");
 
         if(cusOffset != -1)
             lockRecord(cusFile, F_UNLCK, cusOffset, sizeof(struct Customer));
         close(cusFile);
-
-        if(ld.status == 2)
-        {
-            char hist[100];
-            sprintf(hist, "%d credited by loan id %d", ld.loanAmount, lID);
-            addHistory(ld.accountNumber, hist);
-        }
     }
-    else if(choice == 2)
-    {
-        ld.status = 3;   // rejected
-        strcpy(text, "Loan rejected");
-    }
-    else
-    {
-        strcpy(text, "Invalid Choice");
-    }
-
-    // Save the new loan status (only changed for choice 1 or 2)
-    lseek(file, offset, SEEK_SET);
-    write(file, &ld, sizeof(ld));
 
     lockRecord(file, F_UNLCK, offset, sizeof(struct LoanDetails));
     close(file);
@@ -324,15 +363,21 @@ void changeEMPPassword(int connection_fd, int empID)
         return;
     }
 
-    lockRecord(file, F_WRLCK, offset, sizeof(struct Employee));
-    lseek(file, offset, SEEK_SET);
-    read(file, &emp, sizeof(emp));
-    strcpy(emp.password, crypt(newPassword, HASHKEY));
-    lseek(file, offset, SEEK_SET);
-    write(file, &emp, sizeof(emp));
+    int ok = lockRecord(file, F_WRLCK, offset, sizeof(struct Employee)) != -1;
+    if(ok)
+    {
+        pread(file, &emp, sizeof(emp), offset);
+        strcpy(emp.password, crypt(newPassword, HASHKEY));
+        ok = saveRecord(file, offset, &emp, sizeof(emp));
+    }
     lockRecord(file, F_UNLCK, offset, sizeof(struct Employee));
     close(file);
 
+    if(!ok)
+    {
+        sendInfo(connection_fd, "Unable to change password");
+        return;
+    }
     printf("Employee %d changed password\n", empID);
     sendInfo(connection_fd, "Password changed successfully");
 }
